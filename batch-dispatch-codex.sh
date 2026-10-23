@@ -13,6 +13,7 @@
 #                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
 #   --post-task-validator FILE
 #                            Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
+#   --part-start-index N     任务对应的业务 Part 起始编号（默认: 1）
 #
 # Other options:
 #   -g, --group ID           飞书通知目标
@@ -56,6 +57,7 @@ MODEL=""
 WAIT_TIMEOUT=3600
 STOP_ON_ERROR=false
 TMUX_SESSION="codex-agent"
+PART_START_INDEX=1
 
 # 统计变量
 TOTAL_TASKS=0
@@ -85,6 +87,7 @@ usage() {
                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
   --post-task-validator FILE
                            Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
+  --part-start-index N      任务对应的业务 Part 起始编号（默认: 1）；用于续跑
   -g, --group, --target ID 可选覆盖飞书通知目标；不传则由单任务 dispatch 自动选择
   --cdp PORT               浏览器 CDP 端口；自动传给每个 Part
   -w, --workdir DIR        工作目录（默认: /root）
@@ -107,6 +110,7 @@ parse_args() {
             --append-prompt) APPEND_PROMPT="$2"; shift 2;;
             --append-prompt-file) APPEND_PROMPT_FILE="$2"; shift 2;;
             --post-task-validator) POST_TASK_VALIDATOR="$2"; shift 2;;
+            --part-start-index) PART_START_INDEX="$2"; shift 2;;
             -g|--group|--target) FEISHU_TARGET="$2"; shift 2;;
             --cdp) CDP_PORT="$2"; shift 2;;
             -w|--workdir) WORKDIR="$2"; shift 2;;
@@ -140,6 +144,9 @@ parse_args() {
     fi
     if [[ -n "$POST_TASK_VALIDATOR" && ! -x "$POST_TASK_VALIDATOR" ]]; then
         echo "错误: 任务后验证器不存在或不可执行: $POST_TASK_VALIDATOR" >&2; exit 1
+    fi
+    if ! [[ "$PART_START_INDEX" =~ ^[1-9][0-9]*$ ]]; then
+        echo "错误: --part-start-index 必须是正整数: $PART_START_INDEX" >&2; exit 1
     fi
 }
 
@@ -367,6 +374,7 @@ main() {
     echo "   Feishu: ${FEISHU_TARGET:-none}"
     echo "   Model: ${MODEL:-default}"
     echo "   Tmux session: $TMUX_SESSION"
+    echo "   Part start index: $PART_START_INDEX"
     echo ""
 
     local tasks_json
@@ -392,7 +400,7 @@ main() {
             continue
         fi
 
-        if ! execute_task "$task_name" "$prompt" "$((i + 1))"; then
+        if ! execute_task "$task_name" "$prompt" "$((i + PART_START_INDEX))"; then
             if [ "$STOP_ON_ERROR" = "true" ]; then
                 echo "Task failed, stopping (--stop-on-error)"
                 break
