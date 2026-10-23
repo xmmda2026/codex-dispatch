@@ -301,8 +301,9 @@ $prompt"
         echo "Chaining from previous task (${#LAST_PROMPT} chars)"
     fi
 
-    # 构建 dispatch 参数
-    local dispatch_args=(-p "$full_prompt" -n "$task_name" -w "$WORKDIR" --tmux-session "$TMUX_SESSION")
+    # 每个 Part 使用独立会话，避免重用同名会话导致旧任务状态或通知污染当前任务。
+    local part_session="${TMUX_SESSION}-p${index}"
+    local dispatch_args=(-p "$full_prompt" -n "$task_name" -w "$WORKDIR" --tmux-session "$part_session")
 
     if [ -n "$FEISHU_TARGET" ]; then
         dispatch_args+=(--target "$FEISHU_TARGET")

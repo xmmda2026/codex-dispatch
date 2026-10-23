@@ -4,6 +4,7 @@
 
 - **【修改位置 1】** **说明批量任务的任务后验证器、超时失败语义及其适用场景。**
 - **【修改位置 2】** **说明 `--start-index` 的真实续跑语义：跳过已完成任务并保持原始 Part 编号。**
+- **【修改位置 3】** **说明每个批量 Part 使用独立的 `${TMUX_SESSION}-p<序号>` tmux 会话。**
 
 `codex-dispatch/` 是独立的 Codex 任务派发目录。它负责把任务送进 Codex tmux 会话，让学生可以在 tmux 或 Claw Remote 面板里同步观察执行现场。
 
@@ -305,7 +306,7 @@ Codex 批量串行派发脚本。它可以读取 `tasks.json`，也可以直接�
 - 读取 `--tasks tasks.json` 或 `--markdown-dir DIR`；
 - 合并 `--append-prompt`、`--append-prompt-file` 或默认的 `common-requirements.md`；
 - 校验任务列表格式；
-- 给每个 part 派一个独立 tmux 会话：`${TMUX_SESSION}-p<序号>`；
+- **【修改位置 3】** **给每个 part 派一个独立 tmux 会话：`${TMUX_SESSION}-p<序号>`；**
 - 调用 `dispatch-codex.sh` 派发当前 part；
 - 从 dispatch 输出里提取 `TASK_ID`；
 - 轮询 `data/tasks/<TASK_ID>.json` 等待任务完成；
