@@ -1,5 +1,9 @@
 # Codex Dispatch
 
+## 本次修改说明
+
+- **【修改位置 1】** **说明批量任务的任务后验证器、超时失败语义及其适用场景。**
+
 `codex-dispatch/` 是独立的 Codex 任务派发目录。它负责把任务送进 Codex tmux 会话，让学生可以在 tmux 或 Claw Remote 面板里同步观察执行现场。
 
 ## 目录结构
@@ -279,6 +283,7 @@ Codex 批量串行派发脚本。它可以读取 `tasks.json`，也可以直接�
 - `--model MODEL`：传给每个 Codex 子任务的模型覆盖值。
 - `--wait-timeout SECONDS`：单个 part 最长等待时间；默认 `3600` 秒。
 - `--stop-on-error`：某个 part 失败时立即停止；默认继续后面的任务。
+- **【修改位置 1】** `--post-task-validator FILE`：可选的可执行验证器。任务 Hook 写入 `done` 后才调用；验证器返回非 0 时，该任务仍按失败处理。验证器可读取 `BATCH_TASK_ID`、`BATCH_TASK_NAME`、`BATCH_TASK_INDEX`、`BATCH_TASK_WORKDIR` 和 `BATCH_PREVIOUS_HEAD` 环境变量。
 - `--tmux-session NAME`：基础 tmux 会话名前缀；每个 part 会变成 `${NAME}-p<序号>`。
 - `-h, --help`：打印帮助。
 
@@ -302,6 +307,7 @@ Codex 批量串行派发脚本。它可以读取 `tasks.json`，也可以直接�
 - 调用 `dispatch-codex.sh` 派发当前 part；
 - 从 dispatch 输出里提取 `TASK_ID`；
 - 轮询 `data/tasks/<TASK_ID>.json` 等待任务完成；
+- **【修改位置 1】** Hook 的 `done` 仅表示任务已结束；配置任务后验证器时，只有验证器成功才视为业务成功。等待超时始终记为任务失败，`--stop-on-error` 会阻止派发后续任务；
 - 把上一步结果摘要传给下一步，形成链式上下文；
 - 最后输出成功、失败、超时和总耗时。
 

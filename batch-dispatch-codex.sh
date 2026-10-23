@@ -11,6 +11,8 @@
 #   --append-prompt TEXT     给每个任务追加同一段 Prompt
 #   --append-prompt-file FILE
 #                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
+#   --post-task-validator FILE
+#                            Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
 #
 # Other options:
 #   -g, --group ID           飞书通知目标
@@ -44,6 +46,7 @@ MARKDOWN_DIR=""
 MARKDOWN_PATTERN="part*.md"
 APPEND_PROMPT=""
 APPEND_PROMPT_FILE=""
+POST_TASK_VALIDATOR=""
 FEISHU_TARGET=""
 CDP_PORT=""
 WORKDIR="/root"
@@ -80,6 +83,8 @@ usage() {
   --append-prompt TEXT     给每个任务末尾追加同一段 Prompt
   --append-prompt-file FILE
                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
+  --post-task-validator FILE
+                           Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
   -g, --group, --target ID 可选覆盖飞书通知目标；不传则由单任务 dispatch 自动选择
   --cdp PORT               浏览器 CDP 端口；自动传给每个 Part
   -w, --workdir DIR        工作目录（默认: /root）
@@ -101,6 +106,7 @@ parse_args() {
             --markdown-pattern) MARKDOWN_PATTERN="$2"; shift 2;;
             --append-prompt) APPEND_PROMPT="$2"; shift 2;;
             --append-prompt-file) APPEND_PROMPT_FILE="$2"; shift 2;;
+            --post-task-validator) POST_TASK_VALIDATOR="$2"; shift 2;;
             -g|--group|--target) FEISHU_TARGET="$2"; shift 2;;
             --cdp) CDP_PORT="$2"; shift 2;;
             -w|--workdir) WORKDIR="$2"; shift 2;;
@@ -131,6 +137,9 @@ parse_args() {
     fi
     if [[ -n "$APPEND_PROMPT_FILE" && ! -f "$APPEND_PROMPT_FILE" ]]; then
         echo "错误: 追加 Prompt 文件不存在: $APPEND_PROMPT_FILE" >&2; exit 1
+    fi
+    if [[ -n "$POST_TASK_VALIDATOR" && ! -x "$POST_TASK_VALIDATOR" ]]; then
+        echo "错误: 任务后验证器不存在或不可执行: $POST_TASK_VALIDATOR" >&2; exit 1
     fi
 }
 
@@ -238,6 +247,23 @@ extract_task_summary() {
     echo "$output"
 }
 
+run_post_task_validator() {
+    local task_id=$1
+    local task_name=$2
+    local task_index=$3
+    local previous_head=$4
+
+    [[ -n "$POST_TASK_VALIDATOR" ]] || return 0
+
+    echo "Running post-task validator: $POST_TASK_VALIDATOR"
+    BATCH_TASK_ID="$task_id" \
+    BATCH_TASK_NAME="$task_name" \
+    BATCH_TASK_INDEX="$task_index" \
+    BATCH_TASK_WORKDIR="$WORKDIR" \
+    BATCH_PREVIOUS_HEAD="$previous_head" \
+        "$POST_TASK_VALIDATOR"
+}
+
 # 执行单个任务
 execute_task() {
     local task_name=$1
@@ -250,6 +276,10 @@ execute_task() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local task_start_time=$(date +%s)
+    local previous_head=""
+    if git -C "$WORKDIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+        previous_head=$(git -C "$WORKDIR" rev-parse HEAD)
+    fi
 
     # 构建完整 prompt（链式传递）
     local full_prompt="$prompt"
@@ -305,6 +335,11 @@ $prompt"
 
     # 等待完成
     if wait_for_task_completion "$task_id" "$WAIT_TIMEOUT" "$task_start_time"; then
+        if ! run_post_task_validator "$task_id" "$task_name" "$index" "$previous_head"; then
+            echo "Post-task validation failed: $task_name"
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            return 1
+        fi
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         LAST_PROMPT="$prompt"
         LAST_TASK_ID="$task_id"
@@ -312,10 +347,9 @@ $prompt"
     else
         if [ "$WAIT_RESULT" = "timeout" ]; then
             TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1))
-            LAST_PROMPT="$prompt"
-            LAST_TASK_ID="$task_id"
-            echo "   Timeout recorded as non-fatal, continue batch"
-            return 0
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            echo "   Timeout recorded as task failure"
+            return 1
         fi
         FAILED_COUNT=$((FAILED_COUNT + 1))
         LAST_PROMPT="$prompt"
