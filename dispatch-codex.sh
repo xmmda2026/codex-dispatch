@@ -294,8 +294,22 @@ fi
 # ---- 6. Run Codex ----
 if [ -n "$ENABLE_TMUX" ]; then
     echo "Creating tmux session: $TMUX_SESSION"
-    "${CMD[@]}" 2>&1 | tee "$TASK_OUTPUT"
-    EXIT_CODE=${PIPESTATUS[0]}
+    if "${CMD[@]}" 2>&1 | tee "$TASK_OUTPUT"; then
+        EXIT_CODE=0
+    else
+        EXIT_CODE=${PIPESTATUS[0]}
+    fi
+
+    if [ "$EXIT_CODE" -ne 0 ]; then
+        echo "Codex runner failed to start with code: $EXIT_CODE" >&2
+        if [ -f "$META_FILE" ]; then
+            jq --arg code "$EXIT_CODE" --arg ts "$(date -Iseconds)" \
+                '. + {exit_code: ($code | tonumber), completed_at: $ts, status: "failed", failure_reason: "Codex runner failed to start"}' \
+                "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+        fi
+        exit "$EXIT_CODE"
+    fi
+
     echo ""
     echo "Task sent to codex session: $TMUX_SESSION"
     echo "To watch: tmux -S $TMUX_SOCKET attach -t $TMUX_SESSION"
