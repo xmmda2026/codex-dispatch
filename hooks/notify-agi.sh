@@ -26,8 +26,12 @@ check_task_completion() {
     if [ "$has_exit_code" = "true" ]; then
         if ! [[ "$exit_code" =~ ^[0-9]+$ ]] || [ "$exit_code" -ne 0 ]; then
             echo "failed"
-        else
+            return
+        fi
+        if echo "$output" | grep -qE "(任务.*完成|Task completed|Successfully completed|完成标记|✅|git commit|Co-Authored-By:)"; then
             echo "done"
+        else
+            echo "failed"
         fi
         return
     fi
