@@ -327,7 +327,7 @@ else
     # Update meta with completion
     if [ -f "$META_FILE" ]; then
         jq --arg code "$EXIT_CODE" --arg ts "$(date -Iseconds)" \
-            '. + {exit_code: ($code | tonumber), completed_at: $ts, status: "done"}' \
+            '. + {exit_code: ($code | tonumber), completed_at: $ts, status: (if ($code | tonumber) == 0 then "done" else "failed" end)}' \
             "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
     fi
 

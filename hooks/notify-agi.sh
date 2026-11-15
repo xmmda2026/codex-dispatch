@@ -18,6 +18,19 @@ log() { echo "[$(date -Iseconds)] $*" >> "$LOG"; }
 
 check_task_completion() {
     local output="$1"
+    local has_exit_code="$2"
+    local exit_code="$3"
+
+    # A headless runner exit is the only authoritative terminal signal. A
+    # success-looking final message must never hide a failed runner.
+    if [ "$has_exit_code" = "true" ]; then
+        if ! [[ "$exit_code" =~ ^[0-9]+$ ]] || [ "$exit_code" -ne 0 ]; then
+            echo "failed"
+        else
+            echo "done"
+        fi
+        return
+    fi
 
     if echo "$output" | grep -qE "(Interrupted.*What should Codex do|请指示如何继续|用户是否希望我：|AskUserQuestion)"; then
         echo "waiting_input"
@@ -34,7 +47,7 @@ check_task_completion() {
         return
     fi
 
-    echo "done"
+    echo "in_progress"
 }
 
 log "=== notify-agi.sh fired ==="
@@ -44,7 +57,11 @@ THREAD_ID=""
 OUTPUT=""
 TASK_ID="${CODING_AGENT_TASK_ID:-}"
 SESSION_DIR="${CODING_AGENT_SESSION_DIR:-$RESULT_DIR}"
-EXIT_CODE="${CODEX_EXIT_CODE:-0}"
+EXIT_CODE="${CODEX_EXIT_CODE:-}"
+HAS_EXIT_CODE=false
+if [ -n "${CODEX_EXIT_CODE+x}" ]; then
+    HAS_EXIT_CODE=true
+fi
 
 if [ -n "$PAYLOAD" ]; then
     event_type="$(printf '%s' "$PAYLOAD" | jq -r '.type // empty' 2>/dev/null || true)"
@@ -86,7 +103,7 @@ else
         log "Output from task-output.txt (${#OUTPUT} chars)"
     fi
 
-    [ -z "$OUTPUT" ] && OUTPUT="任务已完成（exit_code=${EXIT_CODE}），但输出为空。"
+    [ -z "$OUTPUT" ] && OUTPUT="Codex runner exited (exit_code=${EXIT_CODE:-unknown})，但输出为空。"
 fi
 
 META_FILE=""
@@ -111,12 +128,14 @@ fi
 log "meta: task=$TASK_NAME target=$FEISHU_TARGET task_id=$TASK_ID"
 
 DONE_TS="$(date -Iseconds)"
-COMPLETION_STATUS=$(check_task_completion "$OUTPUT")
+COMPLETION_STATUS=$(check_task_completion "$OUTPUT" "$HAS_EXIT_CODE" "$EXIT_CODE")
 log "Task completion status: $COMPLETION_STATUS"
 
 WRITE_STATUS="done"
 if [ "$COMPLETION_STATUS" = "waiting_input" ]; then
     WRITE_STATUS="waiting_input"
+elif [ "$COMPLETION_STATUS" = "failed" ]; then
+    WRITE_STATUS="failed"
 fi
 
 TASK_FILE="${RESULT_DIR}/tasks/${TASK_ID}.json"
