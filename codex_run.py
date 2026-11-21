@@ -347,11 +347,11 @@ def run_tmux(args: argparse.Namespace) -> int:
     if session_exists:
         # Create new session with temp name, kill old, rename
         tmp_session = f"{session}__new"
-        subprocess.check_call(tmux_cmd(socket_path, "new", "-d", "-s", tmp_session, "-n", "shell"))
+        subprocess.check_call(tmux_cmd(socket_path, "new", "-d", "-x", "200", "-s", tmp_session, "-n", "shell"))
         subprocess.run(tmux_cmd(socket_path, "kill-session", "-t", session), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.check_call(tmux_cmd(socket_path, "rename-session", "-t", tmp_session, session))
     else:
-        subprocess.check_call(tmux_cmd(socket_path, "new", "-d", "-s", session, "-n", "shell"))
+        subprocess.check_call(tmux_cmd(socket_path, "new", "-d", "-x", "200", "-s", session, "-n", "shell"))
 
     # Start session self-destruct timer (independent process group)
     session_ttl = int(os.environ.get("SESSION_TTL", "43200"))  # default 12 hours
