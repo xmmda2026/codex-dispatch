@@ -176,8 +176,15 @@ jq -n \
 log "Wrote latest.json"
 
 if [ -n "$META_FILE" ] && [ -f "$META_FILE" ]; then
-    jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" '. + {completed_at: $ts, status: $status}' \
-        "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    if [ "$HAS_EXIT_CODE" = true ]; then
+        jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" --arg code "$EXIT_CODE" \
+            '. + {completed_at: $ts, status: $status, exit_code: ($code | tonumber)}' \
+            "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    else
+        jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" \
+            '. + {completed_at: $ts, status: $status}' \
+            "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    fi
 fi
 
 if [ -z "$TASK_COMPLETED_AT" ]; then
