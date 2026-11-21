@@ -28,11 +28,7 @@ check_task_completion() {
             echo "failed"
             return
         fi
-        if echo "$output" | grep -qE "(任务.*完成|Task completed|Successfully completed|完成标记|✅|git commit|Co-Authored-By:)"; then
-            echo "done"
-        else
-            echo "failed"
-        fi
+        echo "done"
         return
     fi
 
@@ -41,7 +37,15 @@ check_task_completion() {
         return
     fi
 
-    if echo "$output" | grep -qE "(任务.*完成|Task completed|Successfully completed|完成标记|✅)"; then
+    # The app-server emits agent-turn-complete for tool/read progress events.
+    # A payload such as {"title":"Read SEO metadata prompt"} is not a
+    # terminal assistant result and must not release Batch Dispatch.
+    if printf '%s' "$output" | jq -e 'type == "object" and (.title | type == "string")' >/dev/null 2>&1; then
+        echo "in_progress"
+        return
+    fi
+
+    if echo "$output" | grep -qE "(任务.*完成|全部阶段.*(已)?完成|(^|[[:space:][:punct:]])成功[。.!！[:space:]]|Task completed|Successfully completed|Part[[:space:]]+[0-9]+[[:space:]]+complete(d)?\b|[[:space:]]is[[:space:]]+complete(d)?\b|完成标记|✅)"; then
         echo "done"
         return
     fi
@@ -128,12 +132,38 @@ if [ -n "$META_FILE" ]; then
     [ -z "$TASK_ID" ] && TASK_ID=$(jq -r '.task_id // ""' "$META_FILE" 2>/dev/null || echo "")
 fi
 
+# The Codex app-server can invoke notify hooks with stale CODING_AGENT_* values
+# from an unrelated interactive session.  The event payload's cwd is current;
+# for a mismatched metadata workdir, resolve the newest running dispatch whose
+# recorded workdir matches that cwd.  Batch dispatch is serial, so this maps the
+# completion event back to the active Part without trusting stale environment.
+if [ -n "${CWD:-}" ] && { [ -z "$META_FILE" ] || [ "$(jq -r '.workdir // ""' "$META_FILE" 2>/dev/null || true)" != "$CWD" ]; }; then
+    resolved_meta="$(find "${RESULT_DIR}/sessions" -mindepth 2 -maxdepth 2 -type f -name task-meta.json -print0 2>/dev/null \
+        | xargs -0 -r jq -r --arg cwd "$CWD" 'select(.status == "running" and .workdir == $cwd) | [.started_at, input_filename] | @tsv' 2>/dev/null \
+        | sort -r \
+        | head -n 1 \
+        | cut -f2-)"
+    if [ -n "$resolved_meta" ] && [ -f "$resolved_meta" ]; then
+        META_FILE="$resolved_meta"
+        TASK_NAME=$(jq -r '.task_name // "unknown"' "$META_FILE" 2>/dev/null || echo "unknown")
+        FEISHU_TARGET=$(jq -r '.feishu_target // ""' "$META_FILE" 2>/dev/null || echo "")
+        TASK_COMPLETED_AT=$(jq -r '.completed_at // ""' "$META_FILE" 2>/dev/null || echo "")
+        TASK_ID=$(jq -r '.task_id // ""' "$META_FILE" 2>/dev/null || echo "")
+        log "Resolved stale metadata by cwd: $META_FILE"
+    fi
+fi
+
 [ -z "$TASK_ID" ] && TASK_ID="adhoc-$(date +%s)"
 log "meta: task=$TASK_NAME target=$FEISHU_TARGET task_id=$TASK_ID"
 
 DONE_TS="$(date -Iseconds)"
 COMPLETION_STATUS=$(check_task_completion "$OUTPUT" "$HAS_EXIT_CODE" "$EXIT_CODE")
 log "Task completion status: $COMPLETION_STATUS"
+
+if [ "$COMPLETION_STATUS" = "in_progress" ]; then
+    log "Intermediate tool/read event; preserving task state"
+    exit 0
+fi
 
 WRITE_STATUS="done"
 if [ "$COMPLETION_STATUS" = "waiting_input" ]; then
@@ -176,8 +206,15 @@ jq -n \
 log "Wrote latest.json"
 
 if [ -n "$META_FILE" ] && [ -f "$META_FILE" ]; then
-    jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" '. + {completed_at: $ts, status: $status}' \
-        "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    if [ "$HAS_EXIT_CODE" = true ]; then
+        jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" --arg code "$EXIT_CODE" \
+            '. + {completed_at: $ts, status: $status, exit_code: ($code | tonumber)}' \
+            "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    else
+        jq --arg ts "$DONE_TS" --arg status "$WRITE_STATUS" \
+            '. + {completed_at: $ts, status: $status}' \
+            "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
+    fi
 fi
 
 if [ -z "$TASK_COMPLETED_AT" ]; then
