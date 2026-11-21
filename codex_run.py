@@ -405,47 +405,20 @@ def run_tmux(args: argparse.Namespace) -> int:
         subprocess.check_call(tmux_cmd(socket_path, "send-keys", "-t", target, "Enter"))
         time.sleep(0.05)
 
-    # Build interactive codex command (no 'exec' subcommand = interactive TUI mode)
-    # Note: -a never and --dangerously-bypass-approvals-and-sandbox are mutually exclusive
-    cmd_parts = [
-        args.codex_bin,
-        *codex_model_args(args),
-        "-C",
-        cwd,
-    ]
-    if args.yolo:
-        cmd_parts += ["--dangerously-bypass-approvals-and-sandbox"]
-    else:
-        cmd_parts += ["-a", "never"]
-        if args.sandbox:
-            cmd_parts += ["-s", args.sandbox]
-
-    launch = f"cd {shlex.quote(cwd)} && " + " ".join(shlex.quote(p) for p in cmd_parts)
+    # A TUI stays alive after an agent turn and has no task exit code.  Run the
+    # headless command inside tmux instead, so observers can still capture the
+    # pane while the hook receives the authoritative process result.
+    cmd_parts = build_headless_cmd(args)
+    command = " ".join(shlex.quote(part) for part in cmd_parts)
+    launch = (
+        f"cd {shlex.quote(cwd)} && {command}; "
+        "exit_code=$?; "
+        f"CODEX_EXIT_CODE=$exit_code {shlex.quote(NOTIFY_SCRIPT)}; "
+        "printf '\\nCodex exited with code: %s\\n' \"$exit_code\"; "
+        "exit \"$exit_code\""
+    )
     subprocess.check_call(tmux_cmd(socket_path, "send-keys", "-t", target, "-l", "--", launch))
     subprocess.check_call(tmux_cmd(socket_path, "send-keys", "-t", target, "Enter"))
-
-    if tmux_wait_for_any_text(
-        socket_path,
-        target,
-        patterns=["Try new model", "Use existing model"],
-        timeout_s=5,
-        poll_s=0.3,
-    ):
-        subprocess.check_call(tmux_cmd(socket_path, "send-keys", "-t", target, "Down"))
-        time.sleep(0.2)
-        subprocess.check_call(tmux_cmd(socket_path, "send-keys", "-t", target, "Enter"))
-        time.sleep(1.0)
-
-    if prompt:
-        tmux_wait_for_any_text(
-            socket_path,
-            target,
-            patterns=["OpenAI Codex", "Tip:", "›", ">"],
-            timeout_s=20,
-            poll_s=0.4,
-        )
-        time.sleep(0.2)
-        tmux_paste_prompt(socket_path, target, prompt)
 
     print(f"Started codex-agent in tmux session: {session}")
     print(f"To monitor: tmux -S {shlex.quote(socket_path)} attach -t {shlex.quote(session)}")
