@@ -163,6 +163,7 @@ if [ -z "$TASK_NAME" ]; then
     TASK_NAME="${TMUX_SESSION_NAME:-adhoc-$(date +%s)}"
 fi
 TASK_ID="${TASK_NAME}_$(date +%Y%m%d_%H%M%S)_$$"
+COMPLETION_MARKER="TASK_COMPLETE:${TASK_ID}"
 
 RUN_MODE="headless"
 TMUX_SOCKET=""
@@ -186,6 +187,11 @@ fi
 mkdir -p "$RESULT_DIR" "$RESULT_DIR/tasks" "$PROMPTS_DIR" "$WORKDIR"
 
 PROMPT_FILE="${PROMPTS_DIR}/${TASK_ID}.md"
+PROMPT="${PROMPT}
+
+完成本任务、完成全部必要验证且准备交接时，最终答复必须单独包含以下完成标记（逐字保留）：
+${COMPLETION_MARKER}
+未完成、等待输入或仅报告中间进度时，禁止输出该标记。"
 printf '%s\n' "$PROMPT" > "$PROMPT_FILE"
 PROMPT_BASENAME=$(basename "$PROMPT_FILE")
 EFFECTIVE_PROMPT="Read the file at the absolute path below using your Read tool, then follow all instructions strictly.
@@ -204,6 +210,7 @@ fi
 jq -n \
     --arg name "$TASK_NAME" \
     --arg task_id "$TASK_ID" \
+    --arg completion_marker "$COMPLETION_MARKER" \
     --arg target "$FEISHU_TARGET" \
     --arg cdp_port "$CDP_PORT" \
     --arg session "$CALLBACK_SESSION" \
@@ -216,7 +223,7 @@ jq -n \
     --arg run_mode "$RUN_MODE" \
     --arg tmux_session "$TMUX_SESSION" \
     --arg tmux_socket "$TMUX_SOCKET" \
-    '{task_name: $name, task_id: $task_id, feishu_target: $target, cdp_port: $cdp_port, callback_session: $session, prompt: $prompt, prompt_file: $prompt_file, effective_prompt: $effective_prompt, model: $model, workdir: $workdir, started_at: $ts, run_mode: $run_mode, tmux_session: $tmux_session, tmux_socket: $tmux_socket, status: "running"}' \
+    '{task_name: $name, task_id: $task_id, completion_marker: $completion_marker, feishu_target: $target, cdp_port: $cdp_port, callback_session: $session, prompt: $prompt, prompt_file: $prompt_file, effective_prompt: $effective_prompt, model: $model, workdir: $workdir, started_at: $ts, run_mode: $run_mode, tmux_session: $tmux_session, tmux_socket: $tmux_socket, status: "running"}' \
     > "$META_FILE"
 
 if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$RESULT_DIR" ]; then
