@@ -134,25 +134,20 @@ if [ -n "$META_FILE" ]; then
     [ -z "$TASK_ID" ] && TASK_ID=$(jq -r '.task_id // ""' "$META_FILE" 2>/dev/null || echo "")
 fi
 
-# The Codex app-server can invoke notify hooks with stale CODING_AGENT_* values
-# from an unrelated interactive session.  The event payload's cwd is current;
-# for a mismatched metadata workdir, resolve the newest running dispatch whose
-# recorded workdir matches that cwd.  Batch dispatch is serial, so this maps the
-# completion event back to the active Part without trusting stale environment.
-if [ -n "${CWD:-}" ] && { [ -z "$META_FILE" ] || [ "$(jq -r '.workdir // ""' "$META_FILE" 2>/dev/null || true)" != "$CWD" ]; }; then
-    resolved_meta="$(find "${RESULT_DIR}/sessions" -mindepth 2 -maxdepth 2 -type f -name task-meta.json -print0 2>/dev/null \
-        | xargs -0 -r jq -r --arg cwd "$CWD" 'select(.status == "running" and .workdir == $cwd) | [.started_at, input_filename] | @tsv' 2>/dev/null \
-        | sort -r \
-        | head -n 1 \
-        | cut -f2-)"
-    if [ -n "$resolved_meta" ] && [ -f "$resolved_meta" ]; then
-        META_FILE="$resolved_meta"
-        TASK_NAME=$(jq -r '.task_name // "unknown"' "$META_FILE" 2>/dev/null || echo "unknown")
-        FEISHU_TARGET=$(jq -r '.feishu_target // ""' "$META_FILE" 2>/dev/null || echo "")
-        TASK_COMPLETED_AT=$(jq -r '.completed_at // ""' "$META_FILE" 2>/dev/null || echo "")
-        COMPLETION_MARKER=$(jq -r '.completion_marker // ""' "$META_FILE" 2>/dev/null || echo "")
-        TASK_ID=$(jq -r '.task_id // ""' "$META_FILE" 2>/dev/null || echo "")
-        log "Resolved stale metadata by cwd: $META_FILE"
+# A shared workdir is not a task identity: delayed events from an earlier
+# serial Part can otherwise be written into a later Part.  Bind the first
+# event delivered through this task's session environment to its Codex thread,
+# then reject every event from a different thread.
+if [ -n "$PAYLOAD" ] && [ -n "$META_FILE" ] && [ -n "$THREAD_ID" ]; then
+    META_THREAD_ID=$(jq -r '.thread_id // ""' "$META_FILE" 2>/dev/null || true)
+    if [ -n "$META_THREAD_ID" ] && [ "$META_THREAD_ID" != "$THREAD_ID" ]; then
+        log "Ignoring thread mismatch: task_id=$TASK_ID expected=$META_THREAD_ID received=$THREAD_ID"
+        exit 0
+    fi
+    if [ -z "$META_THREAD_ID" ]; then
+        jq --arg thread_id "$THREAD_ID" '. + {thread_id: $thread_id}' "$META_FILE" > "${META_FILE}.tmp" \
+            && mv "${META_FILE}.tmp" "$META_FILE"
+        log "Bound task_id=$TASK_ID to thread_id=$THREAD_ID"
     fi
 fi
 

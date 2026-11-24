@@ -13,6 +13,7 @@
 #                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
 #   --post-task-validator FILE
 #                            Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
+#   --result-file FILE       批处理结束后原子写入结构化结果，供上层编排读取
 #   --start-index N          从第 N 个任务开始执行（默认: 1）
 #
 # Other options:
@@ -58,6 +59,7 @@ WAIT_TIMEOUT=3600
 STOP_ON_ERROR=false
 TMUX_SESSION="codex-agent"
 START_INDEX=1
+RESULT_FILE=""
 
 # 统计变量
 TOTAL_TASKS=0
@@ -87,6 +89,7 @@ usage() {
                            覆盖公共要求文件；Markdown 模式默认读取同目录 common-requirements.md
   --post-task-validator FILE
                            Hook 写入 done 后调用的可执行验证器；非 0 视为当前任务失败
+  --result-file FILE        批处理结束后原子写入结构化结果；不含任何业务放行规则
   --start-index N           从第 N 个任务开始执行（默认: 1）；用于中断后续跑
   -g, --group, --target ID 可选覆盖飞书通知目标；不传则由单任务 dispatch 自动选择
   --cdp PORT               浏览器 CDP 端口；自动传给每个 Part
@@ -111,6 +114,7 @@ parse_args() {
             --append-prompt-file) APPEND_PROMPT_FILE="$2"; shift 2;;
             --post-task-validator) POST_TASK_VALIDATOR="$2"; shift 2;;
             --start-index) START_INDEX="$2"; shift 2;;
+            --result-file) RESULT_FILE="$2"; shift 2;;
             -g|--group|--target) FEISHU_TARGET="$2"; shift 2;;
             --cdp) CDP_PORT="$2"; shift 2;;
             -w|--workdir) WORKDIR="$2"; shift 2;;
@@ -144,6 +148,9 @@ parse_args() {
     fi
     if [[ -n "$POST_TASK_VALIDATOR" && ! -x "$POST_TASK_VALIDATOR" ]]; then
         echo "错误: 任务后验证器不存在或不可执行: $POST_TASK_VALIDATOR" >&2; exit 1
+    fi
+    if [[ -n "$RESULT_FILE" ]]; then
+        mkdir -p "$(dirname "$RESULT_FILE")"
     fi
 }
 
@@ -418,6 +425,19 @@ main() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Summary: total=$TOTAL_TASKS success=$SUCCESS_COUNT timeout=$TIMEOUT_COUNT failed=$FAILED_COUNT time=${total_time}s"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [[ -n "$RESULT_FILE" ]]; then
+        local status="failed"
+        if [[ "$FAILED_COUNT" -eq 0 && "$TIMEOUT_COUNT" -eq 0 && "$SUCCESS_COUNT" -eq "$TOTAL_TASKS" ]]; then
+            status="done"
+        fi
+        jq -n --arg status "$status" --arg session "$TMUX_SESSION" --arg workdir "$WORKDIR" \
+            --argjson total "$TOTAL_TASKS" --argjson success "$SUCCESS_COUNT" \
+            --argjson failed "$FAILED_COUNT" --argjson timeout "$TIMEOUT_COUNT" \
+            '{status:$status, tmux_session:$session, workdir:$workdir, total:$total, success:$success, failed:$failed, timeout:$timeout, completed_at:(now|todateiso8601)}' \
+            > "${RESULT_FILE}.tmp" && mv "${RESULT_FILE}.tmp" "$RESULT_FILE"
+        echo "Batch result: $RESULT_FILE"
+    fi
 
     if [ $FAILED_COUNT -gt 0 ]; then exit 1; fi
 }
