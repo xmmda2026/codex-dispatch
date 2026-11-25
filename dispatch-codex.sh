@@ -32,6 +32,7 @@ META_FILE=""
 TASK_OUTPUT="${RESULT_DIR}/task-output.txt"
 RUNNER="$SCRIPT_DIR/codex_run.py"
 NOTIFY_SCRIPT="${SCRIPT_DIR}/hooks/notify-agi.sh"
+TMUX_WATCHER="${SCRIPT_DIR}/scripts/watch-tmux-task.py"
 
 # Defaults
 PROMPT=""
@@ -223,7 +224,7 @@ jq -n \
     --arg run_mode "$RUN_MODE" \
     --arg tmux_session "$TMUX_SESSION" \
     --arg tmux_socket "$TMUX_SOCKET" \
-    '{task_name: $name, task_id: $task_id, completion_marker: $completion_marker, feishu_target: $target, cdp_port: $cdp_port, callback_session: $session, prompt: $prompt, prompt_file: $prompt_file, effective_prompt: $effective_prompt, model: $model, workdir: $workdir, started_at: $ts, run_mode: $run_mode, tmux_session: $tmux_session, tmux_socket: $tmux_socket, status: "running"}' \
+    '{task_name: $name, task_id: $task_id, completion_marker: $completion_marker, feishu_target: $target, cdp_port: $cdp_port, callback_session: $session, prompt: $prompt, prompt_file: $prompt_file, effective_prompt: $effective_prompt, model: $model, workdir: $workdir, started_at: $ts, run_mode: $run_mode, tmux_session: $tmux_session, tmux_socket: $tmux_socket, status_writer: (if $run_mode == "tmux" then "tmux-watcher" else "notify-hook" end), status: "running"}' \
     > "$META_FILE"
 
 if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$RESULT_DIR" ]; then
@@ -316,6 +317,30 @@ if [ -n "$ENABLE_TMUX" ]; then
         fi
         exit "$EXIT_CODE"
     fi
+
+    if [ ! -x "$TMUX_WATCHER" ]; then
+        echo "Tmux watcher is missing or not executable: $TMUX_WATCHER" >&2
+        exit 1
+    fi
+    WATCHER_LOG="${SESSION_DIR}/tmux-watcher.log"
+    nohup python3 "$TMUX_WATCHER" \
+        --session-dir "$SESSION_DIR" \
+        --tasks-dir "$RESULT_DIR/tasks" \
+        --task-id "$TASK_ID" \
+        --tmux-session "$TMUX_SESSION" \
+        --tmux-socket "$TMUX_SOCKET" \
+        --timeout-seconds "${TMUX_WATCH_TIMEOUT_SECONDS:-3600}" \
+        --log-file "$WATCHER_LOG" \
+        >> "$WATCHER_LOG" 2>&1 &
+    WATCHER_PID=$!
+    jq --argjson pid "$WATCHER_PID" --arg log "$WATCHER_LOG" \
+        '. + {watcher_pid: $pid, watcher_log: $log, status_writer: "tmux-watcher"}' \
+        "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+    jq --argjson pid "$WATCHER_PID" --arg log "$WATCHER_LOG" \
+        '. + {watcher_pid: $pid, watcher_log: $log, status_writer: "tmux-watcher"}' \
+        "${RESULT_DIR}/tasks/${TASK_ID}.json" > "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" \
+        && mv "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" "${RESULT_DIR}/tasks/${TASK_ID}.json"
+    echo "Task watcher started: pid=$WATCHER_PID log=$WATCHER_LOG"
 
     echo ""
     echo "Task sent to codex session: $TMUX_SESSION"

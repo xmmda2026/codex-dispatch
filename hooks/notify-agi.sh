@@ -138,7 +138,7 @@ fi
 # serial Part can otherwise be written into a later Part.  Bind the first
 # event delivered through this task's session environment to its Codex thread,
 # then reject every event from a different thread.
-if [ -n "$PAYLOAD" ] && [ -n "$META_FILE" ] && [ -n "$THREAD_ID" ]; then
+if [ -z "$PAYLOAD" ] && [ -n "$META_FILE" ] && [ -n "$THREAD_ID" ]; then
     META_THREAD_ID=$(jq -r '.thread_id // ""' "$META_FILE" 2>/dev/null || true)
     if [ -n "$META_THREAD_ID" ] && [ "$META_THREAD_ID" != "$THREAD_ID" ]; then
         log "Ignoring thread mismatch: task_id=$TASK_ID expected=$META_THREAD_ID received=$THREAD_ID"
@@ -174,6 +174,17 @@ if [ "$COMPLETION_STATUS" = "in_progress" ]; then
     log "Intermediate tool/read event; preserving task state"
     exit 0
 fi
+
+# A tmux task has a dedicated watcher keyed to its own session and completion
+# marker.  Interactive global Hook events may be stale or belong to another
+# task, so they may notify and log but must never change task JSON or metadata.
+if [ -n "$PAYLOAD" ]; then
+    log "Interactive event is notification/log only; tmux watcher owns task state"
+    if [ "$COMPLETION_STATUS" != "done" ]; then
+        exit 0
+    fi
+    TASK_COMPLETED_AT="$DONE_TS"
+else
 
 WRITE_STATUS="done"
 if [ "$COMPLETION_STATUS" = "waiting_input" ]; then
@@ -225,6 +236,8 @@ if [ -n "$META_FILE" ] && [ -f "$META_FILE" ]; then
             '. + {completed_at: $ts, status: $status}' \
             "$META_FILE" > "${META_FILE}.tmp" 2>/dev/null && mv "${META_FILE}.tmp" "$META_FILE"
     fi
+fi
+
 fi
 
 if [ -z "$TASK_COMPLETED_AT" ]; then

@@ -229,6 +229,11 @@ wait_for_task_completion() {
                 WAIT_RESULT="waiting_input"
                 echo "Task waiting for input: $task_id"
                 return 1
+            elif [ "$status" = "failed" ]; then
+                WAIT_RESULT="failed"
+                local reason=$(jq -r '.failure_reason // .completion_evidence // "unknown failure"' "$task_file" 2>/dev/null || echo "unknown failure")
+                echo "Task failed: $task_id ($reason)"
+                return 1
             fi
         fi
 
