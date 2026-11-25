@@ -32,6 +32,7 @@ META_FILE=""
 TASK_OUTPUT="${RESULT_DIR}/task-output.txt"
 RUNNER="$SCRIPT_DIR/codex_run.py"
 NOTIFY_SCRIPT="${SCRIPT_DIR}/hooks/notify-agi.sh"
+TMUX_COMPLETION_WATCHER="$SCRIPT_DIR/tmux_completion_watcher.py"
 
 # Defaults
 PROMPT=""
@@ -320,6 +321,22 @@ if [ -n "$ENABLE_TMUX" ]; then
     echo ""
     echo "Task sent to codex session: $TMUX_SESSION"
     echo "To watch: tmux -S $TMUX_SOCKET attach -t $TMUX_SESSION"
+
+    # Interactive notifications come from a shared daemon and do not reliably
+    # inherit this task's session environment. Watch only this tmux pane for
+    # this task's unique completion marker instead.
+    if [ -f "$TMUX_COMPLETION_WATCHER" ]; then
+        setsid python3 "$TMUX_COMPLETION_WATCHER" \
+            --task-id "$TASK_ID" \
+            --session-dir "$SESSION_DIR" \
+            --tasks-dir "$RESULT_DIR/tasks" \
+            --tmux-session "$TMUX_SESSION" \
+            --socket "$TMUX_SOCKET" \
+            > "${SESSION_DIR}/tmux-completion-watcher.log" 2>&1 < /dev/null &
+        echo "Started task-specific tmux completion watcher: $!"
+    else
+        echo "Warning: tmux completion watcher is unavailable; task state depends on notify hook" >&2
+    fi
 else
     echo "Launching Codex (headless)..."
     echo "   Command: ${CMD[*]}"
