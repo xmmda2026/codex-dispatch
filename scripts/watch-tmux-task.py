@@ -10,6 +10,7 @@ never release a Batch Dispatch waiter.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -36,6 +37,13 @@ def read_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def lock_session(meta_path: Path):
+    """Serialize terminal writes with a same-session redispatch."""
+    lock_handle = (meta_path.parent / "dispatch.lock").open("a", encoding="utf-8")
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    return lock_handle
+
+
 def append_log(path: Path, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -53,37 +61,49 @@ def capture(socket: str, session: str) -> tuple[bool, str]:
     return result.returncode == 0, result.stdout
 
 
-def finish(meta_path: Path, task_path: Path, status: str, reason: str, output: str, log_path: Path) -> None:
+def finish(meta_path: Path, task_path: Path, task_id: str, status: str, reason: str, output: str, log_path: Path) -> None:
     timestamp = now()
-    meta = read_json(meta_path)
-    meta.update(
-        {
-            "status": status,
-            "completed_at": timestamp,
-            "status_writer": "tmux-watcher",
-            "watcher_log": str(log_path),
-            "completion_evidence": reason,
-        }
-    )
-    if status == "failed":
-        meta["failure_reason"] = reason
-    atomic_json(meta_path, meta)
+    lock_handle = lock_session(meta_path)
+    try:
+        meta = read_json(meta_path)
+        if meta.get("task_id") == task_id:
+            meta.update(
+                {
+                    "status": status,
+                    "completed_at": timestamp,
+                    "status_writer": "tmux-watcher",
+                    "watcher_log": str(log_path),
+                    "completion_evidence": reason,
+                }
+            )
+            if status == "failed":
+                meta["failure_reason"] = reason
+            atomic_json(meta_path, meta)
+        else:
+            append_log(log_path, f"skip session metadata for stale task_id={task_id}")
 
-    task = read_json(task_path) if task_path.exists() else dict(meta)
-    task.update(
-        {
-            "status": status,
-            "completed_at": timestamp,
-            "timestamp": timestamp,
-            "status_writer": "tmux-watcher",
-            "watcher_log": str(log_path),
-            "completion_evidence": reason,
-            "output": output[-6000:],
-        }
-    )
-    if status == "failed":
-        task["failure_reason"] = reason
-    atomic_json(task_path, task)
+        # A task record is normally created before the watcher starts.  Do not
+        # copy session metadata as a fallback: it may already belong to a newer
+        # task after a same-session redispatch.
+        task = read_json(task_path) if task_path.exists() else {"task_id": task_id}
+        task.update(
+            {
+                "task_id": task_id,
+                "status": status,
+                "completed_at": timestamp,
+                "timestamp": timestamp,
+                "status_writer": "tmux-watcher",
+                "watcher_log": str(log_path),
+                "completion_evidence": reason,
+                "output": output[-6000:],
+            }
+        )
+        if status == "failed":
+            task["failure_reason"] = reason
+        atomic_json(task_path, task)
+    finally:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
     append_log(log_path, f"terminal status={status} reason={reason}")
 
 
@@ -123,7 +143,7 @@ def main() -> int:
             missing_since = missing_since or time.monotonic()
             # Startup has a short race; a session that disappears afterwards is failure.
             if time.monotonic() - missing_since >= 15:
-                finish(meta_path, task_path, "failed", "tmux_session_missing", "", log_path)
+                finish(meta_path, task_path, args.task_id, "failed", "tmux_session_missing", "", log_path)
                 return 1
         else:
             missing_since = None
@@ -132,12 +152,12 @@ def main() -> int:
                 time.sleep(1)
                 confirmed, confirmed_output = capture(args.tmux_socket, args.tmux_session)
                 if confirmed and marker in confirmed_output:
-                    finish(meta_path, task_path, "done", "completion_marker_confirmed", confirmed_output, log_path)
+                    finish(meta_path, task_path, args.task_id, "done", "completion_marker_confirmed", confirmed_output, log_path)
                     return 0
         elapsed = time.monotonic() - started
         time.sleep(2 if elapsed < 30 else 10)
 
-    finish(meta_path, task_path, "failed", "watcher_timeout", "", log_path)
+    finish(meta_path, task_path, args.task_id, "failed", "watcher_timeout", "", log_path)
     return 1
 
 

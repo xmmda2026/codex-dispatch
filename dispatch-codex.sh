@@ -165,6 +165,10 @@ if [ -z "$TASK_NAME" ]; then
 fi
 TASK_ID="${TASK_NAME}_$(date +%Y%m%d_%H%M%S)_$$"
 COMPLETION_MARKER="TASK_COMPLETE:${TASK_ID}"
+if [[ "$TASK_ID" == *$'\n'* || "$TASK_ID" == *$'\r'* || "$TMUX_SESSION" == *$'\n'* || "$TMUX_SESSION" == *$'\r'* ]]; then
+    echo "Error: task and tmux session names must not contain line breaks" >&2
+    exit 1
+fi
 
 RUN_MODE="headless"
 TMUX_SOCKET=""
@@ -173,6 +177,8 @@ if [ -n "$ENABLE_TMUX" ]; then
     TMUX_SOCKET_DIR="${CLAWDBOT_TMUX_SOCKET_DIR:-/root/clawdbot-tmux-sockets}"
     mkdir -p "$TMUX_SOCKET_DIR"
     TMUX_SOCKET="$TMUX_SOCKET_DIR/codex-code.sock"
+    WATCHER_KEY=$(printf '%s' "$TASK_ID" | sha256sum | cut -c1-16)
+    WATCHER_SESSION="codex-dispatch-watcher-${WATCHER_KEY}"
 fi
 
 # 根据 tmux 会话名确定状态目录
@@ -182,6 +188,53 @@ if [ -n "$TMUX_SESSION_NAME" ]; then
 else
     SESSION_DIR="${RESULT_DIR}"
     META_FILE="${RESULT_DIR}/task-meta.json"
+fi
+
+if [ -n "$ENABLE_TMUX" ]; then
+    mkdir -p "$SESSION_DIR"
+    SESSION_LOCK_FILE="${SESSION_DIR}/dispatch.lock"
+    exec 9>"$SESSION_LOCK_FILE"
+    if ! flock -w 30 9; then
+        echo "Error: timed out waiting for dispatch lock: $SESSION_LOCK_FILE" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$ENABLE_TMUX" ] && [ -f "$META_FILE" ]; then
+    PREVIOUS_WATCHER_SESSION=$(jq -r '.watcher_session // ""' "$META_FILE" 2>/dev/null || true)
+    PREVIOUS_TASK_ID=$(jq -r '.task_id // ""' "$META_FILE" 2>/dev/null || true)
+    EXPECTED_PREVIOUS_WATCHER_SESSION=""
+    if [ -n "$PREVIOUS_TASK_ID" ]; then
+        PREVIOUS_WATCHER_KEY=$(printf '%s' "$PREVIOUS_TASK_ID" | sha256sum | cut -c1-16)
+        EXPECTED_PREVIOUS_WATCHER_SESSION="codex-dispatch-watcher-${PREVIOUS_WATCHER_KEY}"
+    fi
+    if [ -n "$EXPECTED_PREVIOUS_WATCHER_SESSION" ] && [ "$PREVIOUS_WATCHER_SESSION" = "$EXPECTED_PREVIOUS_WATCHER_SESSION" ]; then
+        if tmux -S "$TMUX_SOCKET" has-session -t "=$PREVIOUS_WATCHER_SESSION" 2>/dev/null; then
+            if ! tmux -S "$TMUX_SOCKET" kill-session -t "=$PREVIOUS_WATCHER_SESSION" 2>/dev/null \
+                && tmux -S "$TMUX_SOCKET" has-session -t "=$PREVIOUS_WATCHER_SESSION" 2>/dev/null; then
+                echo "Error: failed to stop previous watcher session: $PREVIOUS_WATCHER_SESSION" >&2
+                exit 1
+            fi
+        fi
+    elif [ -n "$PREVIOUS_TASK_ID" ]; then
+        # Tasks started by the previous implementation recorded a PID rather
+        # than a watcher tmux session.  Stop it only after verifying its full
+        # command line identifies this exact watcher task.
+        PREVIOUS_WATCHER_PID=$(jq -r '.watcher_pid // empty' "$META_FILE" 2>/dev/null || true)
+        if [[ "$PREVIOUS_WATCHER_PID" =~ ^[0-9]+$ ]] && [ -r "/proc/${PREVIOUS_WATCHER_PID}/cmdline" ]; then
+            PREVIOUS_WATCHER_CMD=$(tr '\0' ' ' < "/proc/${PREVIOUS_WATCHER_PID}/cmdline" 2>/dev/null || true)
+            if [[ "$PREVIOUS_WATCHER_CMD" == *"watch-tmux-task.py"* && "$PREVIOUS_WATCHER_CMD" == *"--task-id ${PREVIOUS_TASK_ID}"* ]]; then
+                kill "$PREVIOUS_WATCHER_PID" 2>/dev/null || true
+            fi
+        fi
+    fi
+    PREVIOUS_TASK_FILE="${RESULT_DIR}/tasks/${PREVIOUS_TASK_ID}.json"
+    if [ -n "$PREVIOUS_TASK_ID" ] && [ -f "$PREVIOUS_TASK_FILE" ] && [ "$(jq -r '.status // ""' "$PREVIOUS_TASK_FILE")" = "running" ]; then
+        jq --arg ts "$(date -Iseconds)" \
+            '. + {status: "failed", completed_at: $ts, failure_reason: "tmux_session_replaced"}' \
+            "$PREVIOUS_TASK_FILE" > "${PREVIOUS_TASK_FILE}.tmp"
+        mv "${PREVIOUS_TASK_FILE}.tmp" "$PREVIOUS_TASK_FILE"
+    fi
 fi
 
 # ---- 1. Prepare prompt file ----
@@ -232,6 +285,22 @@ if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$RESULT_DIR" ]; then
 fi
 
 cp "$META_FILE" "${RESULT_DIR}/tasks/${TASK_ID}.json"
+
+mark_watcher_failed() {
+    local reason="$1"
+    local timestamp
+    timestamp="$(date -Iseconds)"
+    if [ "$(jq -r '.task_id // ""' "$META_FILE")" = "$TASK_ID" ]; then
+        jq --arg reason "$reason" --arg ts "$timestamp" \
+            '. + {status: "failed", completed_at: $ts, failure_reason: $reason}' \
+            "$META_FILE" > "${META_FILE}.tmp"
+        mv "${META_FILE}.tmp" "$META_FILE"
+    fi
+    jq --arg reason "$reason" --arg ts "$timestamp" \
+        '. + {status: "failed", completed_at: $ts, failure_reason: $reason}' \
+        "${RESULT_DIR}/tasks/${TASK_ID}.json" > "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp"
+    mv "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" "${RESULT_DIR}/tasks/${TASK_ID}.json"
+}
 
 echo "Task metadata written: $META_FILE"
 echo "   Task ID: $TASK_ID"
@@ -310,37 +379,72 @@ if [ -n "$ENABLE_TMUX" ]; then
 
     if [ "$EXIT_CODE" -ne 0 ]; then
         echo "Codex runner failed to start with code: $EXIT_CODE" >&2
+        RUNNER_FAILURE_TIMESTAMP="$(date -Iseconds)"
         if [ -f "$META_FILE" ]; then
-            jq --arg code "$EXIT_CODE" --arg ts "$(date -Iseconds)" \
+            jq --arg code "$EXIT_CODE" --arg ts "$RUNNER_FAILURE_TIMESTAMP" \
                 '. + {exit_code: ($code | tonumber), completed_at: $ts, status: "failed", failure_reason: "Codex runner failed to start"}' \
-                "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+                "$META_FILE" > "${META_FILE}.tmp"
+            mv "${META_FILE}.tmp" "$META_FILE"
         fi
+        jq --arg code "$EXIT_CODE" --arg ts "$RUNNER_FAILURE_TIMESTAMP" \
+            '. + {exit_code: ($code | tonumber), completed_at: $ts, status: "failed", failure_reason: "Codex runner failed to start"}' \
+            "${RESULT_DIR}/tasks/${TASK_ID}.json" > "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp"
+        mv "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" "${RESULT_DIR}/tasks/${TASK_ID}.json"
         exit "$EXIT_CODE"
     fi
 
     if [ ! -x "$TMUX_WATCHER" ]; then
         echo "Tmux watcher is missing or not executable: $TMUX_WATCHER" >&2
+        mark_watcher_failed "tmux_watcher_missing"
         exit 1
     fi
     WATCHER_LOG="${SESSION_DIR}/tmux-watcher.log"
-    nohup python3 "$TMUX_WATCHER" \
-        --session-dir "$SESSION_DIR" \
-        --tasks-dir "$RESULT_DIR/tasks" \
-        --task-id "$TASK_ID" \
-        --tmux-session "$TMUX_SESSION" \
-        --tmux-socket "$TMUX_SOCKET" \
-        --timeout-seconds "${TMUX_WATCH_TIMEOUT_SECONDS:-3600}" \
-        --log-file "$WATCHER_LOG" \
-        >> "$WATCHER_LOG" 2>&1 &
-    WATCHER_PID=$!
-    jq --argjson pid "$WATCHER_PID" --arg log "$WATCHER_LOG" \
-        '. + {watcher_pid: $pid, watcher_log: $log, status_writer: "tmux-watcher"}' \
-        "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
-    jq --argjson pid "$WATCHER_PID" --arg log "$WATCHER_LOG" \
-        '. + {watcher_pid: $pid, watcher_log: $log, status_writer: "tmux-watcher"}' \
-        "${RESULT_DIR}/tasks/${TASK_ID}.json" > "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" \
-        && mv "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" "${RESULT_DIR}/tasks/${TASK_ID}.json"
-    echo "Task watcher started: pid=$WATCHER_PID log=$WATCHER_LOG"
+    WATCHER_COMMAND="exec python3 $(printf '%q' "$TMUX_WATCHER") --session-dir $(printf '%q' "$SESSION_DIR") --tasks-dir $(printf '%q' "$RESULT_DIR/tasks") --task-id $(printf '%q' "$TASK_ID") --tmux-session $(printf '%q' "$TMUX_SESSION") --tmux-socket $(printf '%q' "$TMUX_SOCKET") --timeout-seconds $(printf '%q' "${TMUX_WATCH_TIMEOUT_SECONDS:-3600}") --log-file $(printf '%q' "$WATCHER_LOG") >> $(printf '%q' "$WATCHER_LOG") 2>&1"
+
+    if ! jq --arg log "$WATCHER_LOG" --arg session "$WATCHER_SESSION" \
+        '. + {watcher_log: $log, watcher_session: $session, status_writer: "tmux-watcher"}' \
+        "$META_FILE" > "${META_FILE}.tmp" \
+        || ! mv "${META_FILE}.tmp" "$META_FILE" \
+        || ! jq --arg log "$WATCHER_LOG" --arg session "$WATCHER_SESSION" \
+            '. + {watcher_log: $log, watcher_session: $session, status_writer: "tmux-watcher"}' \
+            "${RESULT_DIR}/tasks/${TASK_ID}.json" > "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" \
+        || ! mv "${RESULT_DIR}/tasks/${TASK_ID}.json.tmp" "${RESULT_DIR}/tasks/${TASK_ID}.json"; then
+        mark_watcher_failed "tmux_watcher_metadata_write_failed"
+        exit 1
+    fi
+
+    if ! tmux -S "$TMUX_SOCKET" new-session -d -s "$WATCHER_SESSION" bash -lc "$WATCHER_COMMAND"; then
+        mark_watcher_failed "tmux_watcher_session_create_failed"
+        exit 1
+    fi
+
+    WATCHER_STARTED=false
+    for _ in {1..20}; do
+        if grep -Fq -- "watching task_id=${TASK_ID} session=${TMUX_SESSION}" "$WATCHER_LOG" 2>/dev/null; then
+            if tmux -S "$TMUX_SOCKET" has-session -t "=$WATCHER_SESSION" 2>/dev/null \
+                || [ "$(jq -r '.status // ""' "${RESULT_DIR}/tasks/${TASK_ID}.json")" = "done" ]; then
+                WATCHER_STARTED=true
+                break
+            fi
+        fi
+        sleep 0.5
+    done
+    if [ "$WATCHER_STARTED" != true ]; then
+        if [ "$(jq -r '.status // ""' "${RESULT_DIR}/tasks/${TASK_ID}.json")" = "done" ]; then
+            WATCHER_STARTED=true
+        else
+            echo "Tmux watcher failed to start: $WATCHER_SESSION" >&2
+            if tmux -S "$TMUX_SOCKET" has-session -t "=$WATCHER_SESSION" 2>/dev/null; then
+                tmux -S "$TMUX_SOCKET" kill-session -t "=$WATCHER_SESSION" 2>/dev/null || true
+            fi
+            if [ "$(jq -r '.status // ""' "${RESULT_DIR}/tasks/${TASK_ID}.json")" != "done" ]; then
+                mark_watcher_failed "tmux_watcher_start_failed"
+                exit 1
+            fi
+        fi
+    fi
+
+    echo "Task watcher started: session=$WATCHER_SESSION log=$WATCHER_LOG"
 
     echo ""
     echo "Task sent to codex session: $TMUX_SESSION"
