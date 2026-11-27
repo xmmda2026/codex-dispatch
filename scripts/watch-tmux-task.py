@@ -13,6 +13,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -59,6 +60,46 @@ def capture(socket: str, session: str) -> tuple[bool, str]:
         check=False,
     )
     return result.returncode == 0, result.stdout
+
+
+def send_completion_marker_reminder(socket: str, session: str, marker: str) -> bool:
+    """Ask this task's own tmux session to emit its exact terminal marker once."""
+    reminder = (
+        "Your work appears complete, but the exact completion marker is missing. "
+        f"Send a final response containing exactly: {marker}"
+    )
+    typed = subprocess.run(
+        ["tmux", "-S", socket, "send-keys", "-t", session, "-l", "--", reminder],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if typed.returncode != 0:
+        return False
+    submitted = subprocess.run(
+        ["tmux", "-S", socket, "send-keys", "-t", session, "Enter"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return submitted.returncode == 0
+
+
+def claim_completion_marker_reminder(meta_path: Path, task_id: str) -> bool:
+    """Persist the one-time reminder claim before sending keys to tmux."""
+    lock_handle = lock_session(meta_path)
+    try:
+        meta = read_json(meta_path)
+        if meta.get("task_id") != task_id or meta.get("completion_marker_reminder_sent"):
+            return False
+        meta["completion_marker_reminder_sent"] = True
+        atomic_json(meta_path, meta)
+        return True
+    finally:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
 
 
 def finish(meta_path: Path, task_path: Path, task_id: str, status: str, reason: str, output: str, log_path: Path) -> None:
@@ -154,6 +195,12 @@ def main() -> int:
                 if confirmed and marker in confirmed_output:
                     finish(meta_path, task_path, args.task_id, "done", "completion_marker_confirmed", confirmed_output, log_path)
                     return 0
+            elif re.search(r"(?<![A-Z0-9_:])TASK_COMPLETE(?![A-Z0-9_:])", output):
+                if claim_completion_marker_reminder(meta_path, args.task_id):
+                    if send_completion_marker_reminder(args.tmux_socket, args.tmux_session, marker):
+                        append_log(log_path, "sent one-time completion marker reminder")
+                    else:
+                        append_log(log_path, "failed to send completion marker reminder")
         elapsed = time.monotonic() - started
         time.sleep(2 if elapsed < 30 else 10)
 

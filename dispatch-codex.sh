@@ -245,6 +245,7 @@ PROMPT="${PROMPT}
 
 完成本任务、完成全部必要验证且准备交接时，最终答复必须单独包含以下完成标记（逐字保留）：
 ${COMPLETION_MARKER}
+只输出通用的 TASK_COMPLETE 不算完成，必须包含上述完整 task-id；缺少或拼写不一致会使串行批次继续等待。
 未完成、等待输入或仅报告中间进度时，禁止输出该标记。"
 printf '%s\n' "$PROMPT" > "$PROMPT_FILE"
 PROMPT_BASENAME=$(basename "$PROMPT_FILE")
